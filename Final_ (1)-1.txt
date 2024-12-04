@@ -1,0 +1,428 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # Importing neccessary libraries
+
+# In[2]:
+
+
+import os
+import shutil
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import warnings
+
+import tensorflow as tf
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense, Dropout, GlobalAveragePooling2D, Conv2D, MaxPool2D, BatchNormalization
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import EarlyStopping, LearningRateScheduler
+from tensorflow.keras.applications import ResNet50, InceptionV3
+
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
+from tabulate import tabulate
+warnings.filterwarnings('ignore')
+
+
+# # Preparing train and test Image Generator
+
+# In[3]:
+
+
+dataset_dir = './dataset/cell_images'
+train_dir = './dataset/split/train'
+val_dir = './dataset/split/validation'
+test_dir = './dataset/split/test'
+
+all_data = []
+for class_label in ['Parasitized', 'Uninfected']:
+    class_path = os.path.join(dataset_dir, class_label)
+    for img in os.listdir(class_path):
+        all_data.append((os.path.join(class_path, img), class_label))
+
+data_df = pd.DataFrame(all_data, columns=['path', 'label'])
+#data_sample = data_df.sample(n=2700, random_state=42)
+data_sample = data_df
+
+train_val_data, test_data = train_test_split(data_sample, test_size=0.2, stratify=data_sample['label'], random_state=42)
+train_data, val_data = train_test_split(train_val_data, test_size=0.25, stratify=train_val_data['label'], random_state=42)
+
+def copy_data(data_subset, target_dir):
+    for _, row in data_subset.iterrows():
+        class_dir = os.path.join(target_dir, row['label'])
+        os.makedirs(class_dir, exist_ok=True)
+        shutil.copy(row['path'], class_dir)
+
+copy_data(train_data, train_dir)
+copy_data(val_data, val_dir)
+copy_data(test_data, test_dir)
+
+datagen = ImageDataGenerator(rescale=1/255.0)
+
+width=128
+height=128
+
+trainDatagen = datagen.flow_from_directory(
+    train_dir,
+    target_size=(width, height),
+    class_mode='binary',
+    batch_size=32
+)
+
+valDatagen = datagen.flow_from_directory(
+    val_dir,
+    target_size=(width, height),
+    class_mode='binary',
+    batch_size=32
+)
+
+testDatagen = datagen.flow_from_directory(
+    test_dir,
+    target_size=(width, height),
+    class_mode='binary',
+    batch_size=32,
+    shuffle=False
+)
+
+
+# In[13]:
+
+
+# Count the number of images in each category
+categories = ['Parasitized', 'Uninfected']
+counts = [len(os.listdir(os.path.join(dataset_dir, category))) for category in categories]
+
+# Generate the pie chart
+plt.figure(figsize=(8, 8))
+plt.pie(counts, labels=categories, autopct='%1.1f%%', startangle=90, colors=['#ff9999', '#66b3ff'])
+plt.title('Distribution of Uninfected vs Parasitized Cells')
+plt.show()
+
+
+# # CNN Model
+
+# In[4]:
+
+
+cnn_model = Sequential()
+
+cnn_model.add(Conv2D(32, (3, 3), activation='relu', input_shape=(128, 128, 3)))
+cnn_model.add(BatchNormalization())
+cnn_model.add(MaxPool2D(2, 2))
+cnn_model.add(Dropout(0.2))
+
+cnn_model.add(Conv2D(64, (3, 3), activation='relu'))
+cnn_model.add(BatchNormalization())
+cnn_model.add(MaxPool2D(2, 2))
+cnn_model.add(Dropout(0.3))
+
+cnn_model.add(Conv2D(128, (3, 3), activation='relu'))
+cnn_model.add(BatchNormalization())
+cnn_model.add(MaxPool2D(2, 2))
+cnn_model.add(Dropout(0.4))
+
+cnn_model.add(GlobalAveragePooling2D())
+cnn_model.add(Dense(128, activation='relu'))
+cnn_model.add(Dropout(0.5))
+cnn_model.add(Dense(1, activation='sigmoid'))  
+
+cnn_model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+early_stop = EarlyStopping(monitor='val_loss', patience=5)
+
+def scheduler(epoch, lr):
+    return lr * 0.9 if epoch > 3 else lr
+
+lr_scheduler = LearningRateScheduler(scheduler)
+
+# Train the model
+cnn_history = cnn_model.fit(
+    x=trainDatagen,
+    steps_per_epoch=len(trainDatagen),
+    epochs=10,
+    validation_data=valDatagen,
+    validation_steps=len(valDatagen),
+    callbacks=[early_stop, lr_scheduler]
+)
+
+# Plot learning curves
+def plotLearningCurve(history):
+    epochs = range(1, len(history.history['accuracy']) + 1)
+    # Plot accuracy
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, history.history['accuracy'], label='Training Accuracy')
+    plt.plot(epochs, history.history['val_accuracy'], label='Validation Accuracy')
+    plt.title('Model Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend(loc='best')
+    plt.show()
+    # Plot loss
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, history.history['loss'], label='Training Loss')
+    plt.plot(epochs, history.history['val_loss'], label='Validation Loss')
+    plt.title('Model Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend(loc='best')
+    plt.show()
+
+plotLearningCurve(cnn_history)
+
+
+# # CNN Testing
+
+# In[5]:
+
+
+val_predictions = (cnn_model.predict(testDatagen) > 0.5).astype("int32")
+val_true_labels = testDatagen.classes
+
+cnn_accuracy = accuracy_score(val_true_labels, val_predictions)
+cnn_precision = precision_score(val_true_labels, val_predictions)
+cnn_recall = recall_score(val_true_labels, val_predictions)
+cnn_f1 = f1_score(val_true_labels, val_predictions)
+
+print(f"Accuracy: {cnn_accuracy}")
+print(f"Precision: {cnn_precision}")
+print(f"Recall: {cnn_recall}")
+print(f"F1 Score: {cnn_f1}")
+
+
+# # Resnet Model
+
+# In[6]:
+
+
+base_resnet = ResNet50(weights='imagenet', include_top=False, input_shape=(128, 128, 3))
+
+for layer in base_resnet.layers[:140]:  
+    layer.trainable = False
+for layer in base_resnet.layers[140:]:  
+    layer.trainable = True
+
+resnet_model = Sequential([
+    base_resnet,
+    GlobalAveragePooling2D(),
+    Dense(256, activation='relu'),
+    Dropout(0.5),
+    Dense(1, activation='sigmoid')  
+])
+
+resnet_model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4), loss='binary_crossentropy', metrics=['accuracy'])
+
+early_stop = EarlyStopping(monitor='val_loss', patience=5)
+
+def scheduler(epoch, lr):
+    return lr * 0.9 if epoch > 5 else lr
+
+lr_scheduler = LearningRateScheduler(scheduler)
+
+resnet_history = resnet_model.fit(
+    x=trainDatagen,
+    steps_per_epoch=len(trainDatagen),
+    epochs=10,
+    validation_data=valDatagen,
+    validation_steps=len(valDatagen),
+    callbacks=[early_stop, lr_scheduler]
+)
+
+# Plot learning curves
+def plotLearningCurve(history, title_prefix="ResNet50"):
+    epochs = range(1, len(history.history['accuracy']) + 1)
+    # Plot accuracy
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, history.history['accuracy'], label='Training Accuracy')
+    plt.plot(epochs, history.history['val_accuracy'], label='Validation Accuracy')
+    plt.title(f'{title_prefix} Model Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend(loc='best')
+    plt.show()
+    # Plot loss
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, history.history['loss'], label='Training Loss')
+    plt.plot(epochs, history.history['val_loss'], label='Validation Loss')
+    plt.title(f'{title_prefix} Model Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend(loc='best')
+    plt.show()
+
+plotLearningCurve(resnet_history, "ResNet50")
+
+
+# # Resnet Testing
+
+# In[7]:
+
+
+val_predictions = (resnet_model.predict(testDatagen) > 0.5).astype("int32")
+val_true = valDatagen.classes
+
+resnet_accuracy = accuracy_score(val_true_labels, val_predictions)
+resnet_precision = precision_score(val_true_labels, val_predictions)
+resnet_recall = recall_score(val_true_labels, val_predictions)
+resnet_f1 = f1_score(val_true_labels, val_predictions)
+
+print(f"ResNet50 Accuracy: {resnet_accuracy}")
+print(f"ResNet50 Precision: {resnet_precision}")
+print(f"ResNet50 Recall: {resnet_recall}")
+print(f"ResNet50 F1 Score: {resnet_f1}")
+
+
+# # Inception V3 Model
+
+# In[8]:
+
+
+base_inception = InceptionV3(weights='imagenet', include_top=False, input_shape=(128, 128, 3))
+
+for layer in base_inception.layers[:249]:  
+    layer.trainable = False
+for layer in base_inception.layers[249:]:  
+    layer.trainable = True
+
+inception_model = Sequential([
+    base_inception,
+    GlobalAveragePooling2D(),
+    Dense(256, activation='relu'),
+    Dropout(0.5),
+    Dense(1, activation='sigmoid')  
+])
+
+inception_model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),loss='binary_crossentropy',metrics=['accuracy'])
+
+early_stop = EarlyStopping(monitor='val_loss', patience=3)
+
+inception_history = inception_model.fit(
+    x=trainDatagen,
+    steps_per_epoch=len(trainDatagen),
+    epochs=10,
+    validation_data=valDatagen,
+    validation_steps=len(valDatagen),
+    callbacks=[early_stop]
+)
+
+# Plot learning curves
+def plotLearningCurve(history, title_prefix="InceptionV3"):
+    epochs = range(1, len(history.history['accuracy']) + 1)
+    # Plot accuracy
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, history.history['accuracy'], label='Training Accuracy')
+    plt.plot(epochs, history.history['val_accuracy'], label='Validation Accuracy')
+    plt.title(f'{title_prefix} Model Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend(loc='best')
+    plt.show()
+    # Plot loss
+    plt.figure(figsize=(10, 5))
+    plt.plot(epochs, history.history['loss'], label='Training Loss')
+    plt.plot(epochs, history.history['val_loss'], label='Validation Loss')
+    plt.title(f'{title_prefix} Model Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend(loc='best')
+    plt.show()
+
+plotLearningCurve(inception_history, "InceptionV3")
+
+
+# # Inception V3 Testing
+
+# In[9]:
+
+
+val_predictions = (inception_model.predict(testDatagen) > 0.5).astype("int32")
+val_true_labels = testDatagen.classes
+
+inception_accuracy = accuracy_score(val_true_labels, val_predictions)
+inception_precision = precision_score(val_true_labels, val_predictions)
+inception_recall = recall_score(val_true_labels, val_predictions)
+inception_f1 = f1_score(val_true_labels, val_predictions)
+
+print(f"InceptionV3 Accuracy: {inception_accuracy}")
+print(f"InceptionV3 Precision: {inception_precision}")
+print(f"InceptionV3 Recall: {inception_recall}")
+print(f"InceptionV3 F1 Score: {inception_f1}")
+
+
+# In[10]:
+
+
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+
+def plot_confusion_matrix(test_generator, model, model_name):
+    # Predict the classes
+    predictions = (model.predict(test_generator) > 0.5).astype("int32")
+    true_labels = test_generator.classes
+
+    # Compute confusion matrix
+    cm = confusion_matrix(true_labels, predictions)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=test_generator.class_indices.keys())
+
+    # Plot the confusion matrix
+    plt.figure(figsize=(8, 8))
+    disp.plot(cmap=plt.cm.Blues, ax=plt.gca())
+    plt.title(f'Confusion Matrix for {model_name}')
+    plt.savefig(f'{model_name}_confusion_matrix.png')
+    plt.show()
+
+plot_confusion_matrix(testDatagen, cnn_model, "CNN")
+plot_confusion_matrix(testDatagen, resnet_model, "ResNet")
+plot_confusion_matrix(testDatagen, inception_model, "InceptionV3")
+
+
+# In[12]:
+
+
+model_scores = {
+    "Model": ["CNN", "ResNet50", "InceptionV3"],
+    "Accuracy": [cnn_accuracy, resnet_accuracy, inception_accuracy],
+    "Precision": [cnn_precision, resnet_precision, inception_precision],
+    "Recall": [cnn_recall, resnet_recall, inception_recall],
+    "F1 Score": [cnn_f1, resnet_f1, inception_f1]
+}
+
+scores_df = pd.DataFrame(model_scores)
+
+print(tabulate(scores_df, headers="keys", tablefmt="fancy_grid", floatfmt=".2f"))
+
+
+# Conclusion: CNN and InceptionV3 are the best models while CNN is slightly better than InceptionV3. ResNet50 needs a lot of improvements if it is to be effective on this dataset.
+# 
+
+# In[14]:
+
+
+pip install nbconvert
+
+
+# In[16]:
+
+
+from nbconvert import ScriptExporter
+
+# Input the name of your notebook file
+notebook_file = "Final_.ipynb"
+output_file = "Final_.txt"
+
+exporter = ScriptExporter()
+with open(notebook_file) as f:
+    notebook_content = f.read()
+
+script, _ = exporter.from_notebook_node(notebook_content)
+with open(output_file, 'w') as f:
+    f.write(script)
+
+print(f"Notebook converted to {output_file}")
+
+
+# In[ ]:
+
+
+
+
